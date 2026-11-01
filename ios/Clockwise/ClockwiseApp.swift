@@ -38,7 +38,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate {
     ) -> Bool {
         // The delegate must be set before launch finishes so taps on banners are delivered.
         UNUserNotificationCenter.current().delegate = notifications
-        monitor.start()
+        monitor.start(launchedForLocation: launchOptions?[.location] != nil)
 
         // Every change to a WorkDay (arrival, edit, delete) goes through a save, including background arrivals.
         NotificationCenter.default.addObserver(forName: ModelContext.didSave, object: nil, queue: .main) { [weak self] _ in

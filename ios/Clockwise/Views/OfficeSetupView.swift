@@ -78,7 +78,15 @@ struct OfficeSetupView: View {
                     }
                     Section {
                         LabeledContent("Radius", value: "\(Int(radius)) m")
-                        Slider(value: $radius, in: 50...500, step: 10)
+                        Slider(value: $radius, in: OfficeLocation.minimumRadius...500, step: 10)
+                        if let office = monitor.office, office.radius < OfficeLocation.minimumRadius {
+                            Label(
+                                "Your saved radius (\(Int(office.radius)) m) is too small for iOS to detect reliably while the app is closed. Tap Save office to use \(Int(radius)) m.",
+                                systemImage: "exclamationmark.triangle"
+                            )
+                            .font(.footnote)
+                            .foregroundStyle(.orange)
+                        }
                     } footer: {
                         Text("Search, tap the map, or use your location to place the office pin. A bigger radius detects you earlier but is less precise.")
                     }
@@ -101,7 +109,7 @@ struct OfficeSetupView: View {
                         }
                         .disabled(customDelayMinutes == nil)
                     } footer: {
-                        Text("Entering the radius isn't the same as reaching the time clock. Your time in is recorded this many minutes after you enter. The default grows with the radius (8 min for 50 m).")
+                        Text("Entering the radius isn't the same as reaching the time clock. Your time in is recorded this many minutes after you enter. The default grows with the radius (8 min for 100 m).")
                     }
                     Section {
                         Button(isLocating ? "Locating..." : "Use my current location", systemImage: "location.fill") {
@@ -155,7 +163,7 @@ struct OfficeSetupView: View {
             }
             .onAppear {
                 guard center == nil, let office = monitor.office else { return }
-                radius = office.radius
+                radius = max(office.radius, OfficeLocation.minimumRadius)
                 customDelayMinutes = office.timeInDelayMinutes
                 focus(on: office.coordinate)
             }

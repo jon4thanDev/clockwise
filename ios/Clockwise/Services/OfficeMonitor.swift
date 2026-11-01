@@ -6,21 +6,24 @@ import SwiftData
 @Observable
 final class OfficeMonitor: NSObject, CLLocationManagerDelegate {
     private(set) var authorization: CLAuthorizationStatus
+    private(set) var hasPreciseLocation: Bool
     private(set) var office = OfficeLocation.stored
     private(set) var isInsideOffice: Bool?
 
     @ObservationIgnored private let manager = CLLocationManager()
-    @ObservationIgnored private let monitorTask = Task { await CLMonitor("ClockwiseOffice") }
     @ObservationIgnored private let container: ModelContainer
     @ObservationIgnored private let notifications: NotificationScheduler
+    /// A launch-time state check reports where the user is, not when they crossed the boundary.
+    @ObservationIgnored private var isCheckingInitialState = false
 
-    private static let conditionID = "office"
     private static let insideKey = "wasInsideOffice"
+    private static let removedLegacyMonitorKey = "removedCLMonitor"
 
     init(container: ModelContainer, notifications: NotificationScheduler) {
         self.container = container
         self.notifications = notifications
         authorization = manager.authorizationStatus
+        hasPreciseLocation = manager.accuracyAuthorization == .fullAccuracy
         super.init()
         if office != nil, UserDefaults.standard.object(forKey: Self.insideKey) != nil {
             isInsideOffice = UserDefaults.standard.bool(forKey: Self.insideKey)
@@ -28,18 +31,27 @@ final class OfficeMonitor: NSObject, CLLocationManagerDelegate {
         manager.delegate = self
     }
 
-    /// Must run on every launch: iOS relaunches the app in the background to deliver geofence events.
-    func start() {
-        Task {
-            let monitor = await monitorTask.value
-            if let office, await monitor.record(for: Self.conditionID) == nil {
-                await monitor.add(office.condition, identifier: Self.conditionID)
+    /// Must run on every launch: iOS relaunches the app in the background to deliver region and visit events.
+    /// `launchedForLocation` skips the state check, since iOS is about to deliver the crossing itself.
+    func start(launchedForLocation: Bool) {
+        if !UserDefaults.standard.bool(forKey: Self.removedLegacyMonitorKey) {
+            // Earlier builds used CLMonitor, which didn't reliably wake the app; drop its leftover condition.
+            Task {
+                await CLMonitor("ClockwiseOffice").remove(OfficeLocation.regionID)
+                UserDefaults.standard.set(true, forKey: Self.removedLegacyMonitorKey)
             }
-            do {
-                for try await event in await monitor.events {
-                    handle(event)
-                }
-            } catch {}
+        }
+
+        guard let office else { return }
+        let monitored = manager.monitoredRegions.first { $0.identifier == OfficeLocation.regionID } as? CLCircularRegion
+        if monitored?.center.latitude != office.latitude
+            || monitored?.center.longitude != office.longitude
+            || monitored?.radius != office.radius {
+            manager.startMonitoring(for: office.region)
+        }
+        if !launchedForLocation {
+            isCheckingInitialState = true
+            manager.requestState(for: office.region)
         }
     }
 
@@ -52,11 +64,9 @@ final class OfficeMonitor: NSObject, CLLocationManagerDelegate {
         guard areaChanged else { return }
         isInsideOffice = nil
         UserDefaults.standard.removeObject(forKey: Self.insideKey)
-        Task {
-            let monitor = await monitorTask.value
-            await monitor.remove(Self.conditionID)
-            await monitor.add(location.condition, identifier: Self.conditionID)
-        }
+        manager.startMonitoring(for: location.region)
+        isCheckingInitialState = true
+        manager.requestState(for: location.region)
     }
 
     func requestAuthorization() {
@@ -69,8 +79,10 @@ final class OfficeMonitor: NSObject, CLLocationManagerDelegate {
 
     nonisolated func locationManagerDidChangeAuthorization(_ manager: CLLocationManager) {
         let status = manager.authorizationStatus
+        let isPrecise = manager.accuracyAuthorization == .fullAccuracy
         Task { @MainActor in
             authorization = status
+            hasPreciseLocation = isPrecise
             if status == .authorizedWhenInUse {
                 self.manager.requestAlwaysAuthorization()
             }
@@ -81,54 +93,110 @@ final class OfficeMonitor: NSObject, CLLocationManagerDelegate {
         }
     }
 
-    nonisolated func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
-        // In-progress or open-ended visits carry distantPast/distantFuture dates.
-        guard visit.arrivalDate != .distantPast, visit.departureDate != .distantFuture else { return }
-        let record = (visit.coordinate, visit.arrivalDate, visit.departureDate)
+    nonisolated func locationManager(_ manager: CLLocationManager, didEnterRegion region: CLRegion) {
+        guard region.identifier == OfficeLocation.regionID else { return }
+        let date = Date.now
+        Task { @MainActor in handleEntry(at: date, isEstimated: false) }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didExitRegion region: CLRegion) {
+        guard region.identifier == OfficeLocation.regionID else { return }
+        let date = Date.now
+        Task { @MainActor in handleExit(at: date) }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didDetermineState state: CLRegionState, for region: CLRegion) {
+        guard region.identifier == OfficeLocation.regionID else { return }
+        let date = Date.now
         Task { @MainActor in
+            // Real crossings arrive through didEnterRegion/didExitRegion; only the launch check is handled here.
+            guard isCheckingInitialState else { return }
+            isCheckingInitialState = false
+            switch state {
+            case .inside:
+                handleEntry(at: date, isEstimated: true)
+            case .outside:
+                isInsideOffice = false
+                UserDefaults.standard.set(false, forKey: Self.insideKey)
+            default:
+                break
+            }
+        }
+    }
+
+    nonisolated func locationManager(_ manager: CLLocationManager, didVisit visit: CLVisit) {
+        // Arrival is distantPast when unknown; departure is distantFuture while the visit is still in progress.
+        guard visit.arrivalDate != .distantPast else { return }
+        let coordinate = visit.coordinate
+        let arrival = visit.arrivalDate
+        let departure = visit.departureDate
+        Task { @MainActor in
+            handleVisitArrival(at: coordinate, arrival: arrival)
+            guard departure != .distantFuture else { return }
             let context = container.mainContext
             context.insert(Visit(
-                latitude: record.0.latitude, longitude: record.0.longitude, arrival: record.1, departure: record.2))
+                latitude: coordinate.latitude, longitude: coordinate.longitude, arrival: arrival, departure: departure))
             let cutoff = Date.now.addingTimeInterval(-Visit.retention)
             try? context.delete(model: Visit.self, where: #Predicate { $0.departure < cutoff })
             try? context.save()
         }
     }
 
-    private func handle(_ event: CLMonitor.Event) {
+    private func handleEntry(at date: Date, isEstimated: Bool) {
         let context = container.mainContext
-        let wasInside = isInsideOffice == true
+        isInsideOffice = true
+        UserDefaults.standard.set(true, forKey: Self.insideKey)
+        notifications.cancelEarlyOutWarning()
 
-        switch event.state {
-        case .satisfied:
-            isInsideOffice = true
-            notifications.cancelEarlyOutWarning()
-            let timeIn = event.date.addingTimeInterval(office?.timeInDelay ?? 0)
-            if let workDay = WorkDay.recordArrival(at: timeIn, in: context) {
-                notifications.scheduleReminders(timeOut: workDay.timeOut)
-            } else if let workDay = WorkDay.find(on: event.date, in: context), workDay.leftAt != nil {
-                // Came back after confirming an early out, so the shift is still on.
+        if let workDay = WorkDay.find(on: date, in: context) {
+            // Back in the office, so stepping out didn't end the shift.
+            workDay.departedAt = nil
+            if workDay.leftAt != nil {
                 workDay.leftAt = nil
-                try? context.save()
                 notifications.scheduleReminders(timeOut: workDay.timeOut)
             }
-
-        case .unsatisfied:
-            isInsideOffice = false
-            // The first state reported after setting up the office is not a real departure.
-            guard wasInside,
-                  let workDay = WorkDay.find(on: event.date, in: context),
-                  workDay.leftAt == nil,
-                  event.date < workDay.timeOut
-            else { break }
-            notifications.scheduleEarlyOutWarning(leftAt: event.date, timeOut: workDay.timeOut)
-
-        default:
-            break
+            try? context.save()
+        } else {
+            // An estimated arrival already happened a while ago, so the walk-in delay doesn't apply.
+            let timeIn = isEstimated ? date : date.addingTimeInterval(office?.timeInDelay ?? 0)
+            if let workDay = WorkDay.recordArrival(at: timeIn, isEstimated: isEstimated, in: context) {
+                notifications.scheduleReminders(timeOut: workDay.timeOut)
+            }
         }
+    }
 
-        if let isInsideOffice {
-            UserDefaults.standard.set(isInsideOffice, forKey: Self.insideKey)
+    private func handleExit(at date: Date) {
+        let context = container.mainContext
+        isInsideOffice = false
+        UserDefaults.standard.set(false, forKey: Self.insideKey)
+        guard let workDay = WorkDay.find(on: date, in: context), workDay.leftAt == nil else { return }
+        workDay.departedAt = date
+        try? context.save()
+        if date < workDay.timeOut {
+            notifications.scheduleEarlyOutWarning(leftAt: date, timeOut: workDay.timeOut)
+        }
+    }
+
+    /// Visits report the real arrival time even when delivered late, so they back up missed or estimated arrivals.
+    private func handleVisitArrival(at coordinate: CLLocationCoordinate2D, arrival: Date) {
+        guard let office, Calendar.current.isDateInToday(arrival) else { return }
+        let distance = CLLocation(latitude: coordinate.latitude, longitude: coordinate.longitude)
+            .distance(from: CLLocation(latitude: office.latitude, longitude: office.longitude))
+        // Visit coordinates are approximate, so allow some slack beyond the radius.
+        guard distance <= office.radius + 100 else { return }
+
+        let context = container.mainContext
+        let timeIn = arrival.addingTimeInterval(office.timeInDelay)
+        if let workDay = WorkDay.find(on: arrival, in: context) {
+            guard workDay.isEstimated, timeIn < workDay.timeIn else { return }
+            workDay.timeIn = timeIn
+            workDay.isEstimated = false
+            try? context.save()
+            if workDay.leftAt == nil {
+                notifications.scheduleReminders(timeOut: workDay.timeOut)
+            }
+        } else if let workDay = WorkDay.recordArrival(at: timeIn, in: context) {
+            notifications.scheduleReminders(timeOut: workDay.timeOut)
         }
     }
 }

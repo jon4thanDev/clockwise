@@ -10,7 +10,7 @@ struct OfficeLocation: Codable, Equatable {
 
     private static let storageKey = "officeLocation"
 
-    /// About 7 minutes from the building entrance to the time clock, plus walking the radius at 80 m/min (50 m -> 8 min).
+    /// About 7 minutes from the building entrance to the time clock, plus walking the radius at 80 m/min (100 m -> 8 min).
     static func defaultTimeInDelayMinutes(radius: CLLocationDistance) -> Int {
         Int((7 + radius / 80).rounded())
     }
@@ -23,8 +23,15 @@ struct OfficeLocation: Codable, Equatable {
         CLLocationCoordinate2D(latitude: latitude, longitude: longitude)
     }
 
-    var condition: CLMonitor.CircularGeographicCondition {
-        CLMonitor.CircularGeographicCondition(center: coordinate, radius: radius)
+    static let regionID = "office"
+    /// iOS detects smaller areas late, often only once the app is opened.
+    static let minimumRadius: CLLocationDistance = 100
+
+    var region: CLCircularRegion {
+        let region = CLCircularRegion(center: coordinate, radius: radius, identifier: Self.regionID)
+        region.notifyOnEntry = true
+        region.notifyOnExit = true
+        return region
     }
 
     static var stored: OfficeLocation? {

@@ -12,7 +12,7 @@ struct RootView: View {
 
     var body: some View {
         TabView(selection: $screen) {
-            TodayView(onSetOffice: { screen = .office })
+            TodayView(onSetOffice: { screen = .office }, onShowHistory: { screen = .history })
                 .tabItem { Label("Today", systemImage: "clock") }
                 .tag(Screen.today)
             OfficeSetupView()
@@ -41,10 +41,14 @@ struct RootView: View {
             Button("Yes, I left at \(leftAt.formatted(date: .omitted, time: .shortened))", role: .destructive) {
                 guard let workDay = WorkDay.find(on: leftAt, in: modelContext) else { return }
                 workDay.leftAt = leftAt
+                workDay.departedAt = nil
                 try? modelContext.save()
                 notifications.cancelReminders()
             }
-            Button("No, I just stepped out", role: .cancel) {}
+            Button("No, I just stepped out", role: .cancel) {
+                WorkDay.find(on: leftAt, in: modelContext)?.departedAt = nil
+                try? modelContext.save()
+            }
         } message: { leftAt in
             if let workDay = WorkDay.find(on: leftAt, in: modelContext) {
                 Text("""

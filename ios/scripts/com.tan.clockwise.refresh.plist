@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.tan.clockwise.refresh</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>/Users/apple/Desktop/projects/other/hobbies/clockwise/ios/scripts/refresh-iphone.sh</string>
+    </array>
+    <!-- Monday, Wednesday and Friday at 9:30 PM — phone + Mac are usually on home Wi-Fi then.
+         Retries in the script cover brief offline windows; 7-day signing still survives one missed run. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Weekday</key>
+            <integer>1</integer>
+            <key>Hour</key>
+            <integer>21</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>3</integer>
+            <key>Hour</key>
+            <integer>21</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Weekday</key>
+            <integer>5</integer>
+            <key>Hour</key>
+            <integer>21</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+    </array>
+    <key>StandardOutPath</key>
+    <string>/Users/apple/Library/Logs/clockwise-refresh.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/apple/Library/Logs/clockwise-refresh.log</string>
+</dict>
+</plist>

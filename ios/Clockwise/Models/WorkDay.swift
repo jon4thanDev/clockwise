@@ -7,8 +7,12 @@ final class WorkDay {
 
     @Attribute(.unique) var day: Date
     var timeIn: Date
-    /// Set only when the user confirms they timed out before `timeOut`.
+    /// The confirmed time out. Before `timeOut` (the earliest allowed time out) it's a shortfall.
     var leftAt: Date?
+    /// When the user left the office area and hasn't come back or confirmed it as their time out yet.
+    var departedAt: Date?
+    /// The arrival was only noticed when the app was opened, so `timeIn` may be later than the real arrival.
+    var isEstimated = false
 
     init(timeIn: Date) {
         self.day = Calendar.current.startOfDay(for: timeIn)
@@ -22,6 +26,14 @@ final class WorkDay {
         return timeOut.timeIntervalSince(leftAt)
     }
 
+    var isTimeOutUnconfirmed: Bool { leftAt == nil && departedAt != nil }
+
+    /// A likely shortfall from an early departure the user hasn't confirmed or dismissed.
+    var unconfirmedShortfall: TimeInterval? {
+        guard leftAt == nil, let departedAt, departedAt < timeOut else { return nil }
+        return timeOut.timeIntervalSince(departedAt)
+    }
+
     static func find(on date: Date, in context: ModelContext) -> WorkDay? {
         let day = Calendar.current.startOfDay(for: date)
         var descriptor = FetchDescriptor<WorkDay>(predicate: #Predicate { $0.day == day })
@@ -30,9 +42,10 @@ final class WorkDay {
     }
 
     /// Creates the day's record on the first arrival. Returns nil if the day already has a time in.
-    static func recordArrival(at date: Date, in context: ModelContext) -> WorkDay? {
+    static func recordArrival(at date: Date, isEstimated: Bool = false, in context: ModelContext) -> WorkDay? {
         guard find(on: date, in: context) == nil else { return nil }
         let workDay = WorkDay(timeIn: date)
+        workDay.isEstimated = isEstimated
         context.insert(workDay)
         try? context.save()
         return workDay
